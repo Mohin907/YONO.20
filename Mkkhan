@@ -1,0 +1,274 @@
+const firebaseConfig = {
+  apiKey: "AIzaSyDlhpoHPffa1pBQ0z8L7eyDTfWdMvtQeKQ",
+  authDomain: "the-winner-a25c3.firebaseapp.com",
+  databaseURL: "https://the-winner-a25c3-default-rtdb.firebaseio.com/",
+  projectId: "the-winner-a25c3",
+  storageBucket: "the-winner-a25c3.appspot.com",
+  messagingSenderId: "365924271664",
+  appId: "1:365924271664:web:b856749b065c427f670ff5"
+};
+firebase.initializeApp(firebaseConfig);
+const auth = firebase.auth();
+const db = firebase.database();
+
+auth.onAuthStateChanged(user => {
+  if (user) {
+    document.getElementById('authSection').style.display = 'none';
+    document.getElementById('userSection').style.display = 'block';
+    initUser();
+  } else {
+    document.getElementById('authSection').style.display = 'block';
+    document.getElementById('userSection').style.display = 'none';
+  }
+});
+
+function isValidEmail(email) {
+  const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  return re.test(email);
+}
+
+function signUp() {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+  const referralCode = document.getElementById('referralCode').value.trim();
+
+  if (!isValidEmail(email)) {
+    alert("Please enter a valid email address."); return;
+  }
+  if (password.length < 6) {
+    alert("Password must be at least 6 characters."); return;
+  }
+
+  auth.createUserWithEmailAndPassword(email, password)
+    .then(userCredential => {
+      const userId = userCredential.user.uid;
+      const userRef = db.ref('users/' + userId);
+      const baseData = {
+        balance: referralCode ? 20 : 0,
+        lastLoginReward: "",
+        lastSpinDate: "",
+        referrals: [],
+        referredBy: referralCode || "",
+        referralBonuses: {}
+      };
+      userRef.set(baseData).then(() => {
+        if (referralCode) {
+          const refRef = db.ref('users/' + referralCode);
+          refRef.once('value').then(snapshot => {
+            if (snapshot.exists()) {
+              const refData = snapshot.val();
+              const newBalance = (refData.balance || 0) + 50;
+              const updatedReferrals = refData.referrals || [];
+              updatedReferrals.push(userId);
+              const newBonusRecordKey = db.ref().push().key;
+              const updates = {
+                balance: newBalance,
+                referrals: updatedReferrals
+              };
+              updates['referralBonuses/' + newBonusRecordKey] = {
+                fromUser: userId,
+                amount: 50,
+                timestamp: Date.now()
+              };
+              refRef.update(updates);
+            }
+          });
+        }
+        initUser();
+      });
+    })
+    .catch(e => alert(e.message));
+}
+
+function login() {
+  const email = document.getElementById('email').value.trim();
+  const password = document.getElementById('password').value;
+
+  if (!isValidEmail(email)) {
+    alert("Please enter a valid email address."); return;
+  }
+  if (password.length < 6) {
+    alert("Password must be at least 6 characters."); return;
+  }
+
+  auth.signInWithEmailAndPassword(email, password)
+    .then(() => {
+      // logged in, onAuthStateChanged will handle UI
+    })
+    .catch(e => alert(e.message));
+}
+
+function logout() {
+  auth.signOut();
+}
+
+function initUser() {
+  const user = auth.currentUser;
+  if (!user) return;
+  const userId = user.uid;
+  const userRef = db.ref('users/' + userId);
+
+  userRef.on('value', snapshot => {
+    if (!snapshot.exists()) return;
+    const data = snapshot.val();
+
+    document.getElementById('balance').textContent = data.balance || 0;
+    document.getElementById('myReferralCode').textContent = userId;
+
+    // Show referral bonus history
+    const bonusList = document.getElementById('referralBonusHistory');
+    bonusList.innerHTML = '';
+    if (data.referralBonuses) {
+      Object.values(data.referralBonuses).forEach(bonus => {
+        const li = document.createElement('li');
+        li.textContent = `₹${bonus.amount} from user ${bonus.fromUser}`;
+        bonusList.appendChild(li);
+      });
+    } else {
+      bonusList.innerHTML = '<li>No referral bonuses earned yet.</li>';
+    }
+
+    // Show leaderboard
+    loadLeaderboard();
+
+    // Show wheel section
+    document.getElementById('wheelSection').style.display = 'block';
+  });
+}
+
+function claimDailyReward() {
+  const userId = auth.currentUser.uid;
+  const userRef = db.ref('users/' + userId);
+
+  userRef.once('value').then(snapshot => {
+    if (!snapshot.exists()) return;
+    const data = snapshot.val();
+    const today = new Date().toISOString().slice(0, 10);
+
+    if (data.lastLoginReward === today) {
+      document.getElementById('dailyRewardMsg').textContent = "You have already claimed today's reward.";
+      return;
+    }
+
+    const newBalance = (data.balance || 0) + 5;
+    userRef.update({
+      balance: newBalance,
+      lastLoginReward: today
+    });
+    document.getElementById('dailyRewardMsg').textContent = "₹5 daily reward claimed!";
+  });
+}
+
+function spinWheel() {
+  const spinBtn = document.getElementById('spinBtn');
+  spinBtn.disabled = true;
+  const wheel = document.getElementById('wheelImage');
+  const spinSound = document.getElementById('spinSound');
+  spinSound.play();
+
+  const prizes = [10, 20, 50, 100, 0, 30, 5, 40]; // example prizes in ₹
+  const segmentCount = prizes.length;
+  const segmentDegrees = 360 / segmentCount;
+
+  const userId = auth.currentUser.uid;
+  const userRef = db.ref('users/' + userId);
+
+  userRef.once('value').then(snapshot => {
+    if (!snapshot.exists()) return;
+    const data = snapshot.val();
+
+    const today = new Date().toISOString().slice(0, 10);
+    if (data.lastSpinDate === today) {
+      document.getElementById('spinResult').textContent = "You have already spun the wheel today.";
+      spinBtn.disabled = false;
+      return;
+    }
+
+    const prizeIndex = Math.floor(Math.random() * segmentCount);
+    const prizeAmount = prizes[prizeIndex];
+
+    // Calculate rotation angle so the arrow points at prize segment
+    const rotations = 5; // number of full spins
+    const finalDegree = rotations * 360 + (360 - (prizeIndex * segmentDegrees) - segmentDegrees / 2);
+
+    wheel.style.transform = `rotate(${finalDegree}deg)`;
+
+    setTimeout(() => {
+      spinSound.pause();
+      spinSound.currentTime = 0;
+
+      if (prizeAmount > 0) {
+        const newBalance = (data.balance || 0) + prizeAmount;
+        userRef.update({
+          balance: newBalance,
+          lastSpinDate: today
+        });
+        document.getElementById('spinResult').textContent = `Congratulations! You won ₹${prizeAmount}.`;
+      } else {
+        userRef.update({
+          lastSpinDate: today
+        });
+        document.getElementById('spinResult').textContent = "Sorry, no prize this time. Try again tomorrow!";
+      }
+      spinBtn.disabled = false;
+    }, 4000);
+  });
+}
+
+function requestWithdraw() {
+  const upiId = document.getElementById('upi').value.trim();
+  if (!upiId) {
+    alert('Please enter a valid UPI ID');
+    return;
+  }
+  const userId = auth.currentUser.uid;
+  const userRef = db.ref('users/' + userId);
+
+  userRef.once('value').then(snapshot => {
+    if (!snapshot.exists()) return;
+    const data = snapshot.val();
+    const balance = data.balance || 0;
+
+    if (balance < 110) {
+      alert('Minimum withdrawal amount is ₹110');
+      return;
+    }
+
+    // For demo, just deduct balance and show success message
+    userRef.update({
+      balance: balance - 110
+    }).then(() => {
+      document.getElementById('withdrawalMsg').textContent = `Withdrawal request sent for ₹110 to UPI: ${upiId}`;
+      document.getElementById('upi').value = '';
+    });
+  });
+}
+
+function loadLeaderboard() {
+  const leaderboardRef = db.ref('users');
+  leaderboardRef.orderByChild('balance').limitToLast(10).once('value', snapshot => {
+    const leaderboardList = document.getElementById('leaderboardList');
+    leaderboardList.innerHTML = '';
+
+    let usersArray = [];
+    snapshot.forEach(childSnap => {
+      const userId = childSnap.key;
+      const data = childSnap.val();
+      usersArray.push({ userId, balance: data.balance || 0 });
+    });
+
+    // Sort descending by balance
+    usersArray.sort((a, b) => b.balance - a.balance);
+
+    if (usersArray.length === 0) {
+      leaderboardList.innerHTML = '<li>No players found</li>';
+      return;
+    }
+
+    usersArray.forEach(user => {
+      const li = document.createElement('li');
+      li.textContent = `${user.userId} - ₹${user.balance}`;
+      leaderboardList.appendChild(li);
+    });
+  });
+}
